@@ -198,6 +198,64 @@ public final class Style: StyleProtocol {
         try setLayerProperties(for: id, properties: layerProperties)
     }
 
+    public func updateLayerAsync<T>(withId id: String,
+                                    type: T.Type,
+                                    update: @escaping (inout T) throws -> Void,
+                                    completion: ((Error?) -> Void)? = nil) where T: Layer {
+        do {
+            let oldLayerProperties = try layerProperties(for: id)
+
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    var layer = try T(jsonObject: oldLayerProperties)
+
+                    // Call closure to update the retrieved layer
+                    try update(&layer)
+
+                    let reduceStrategy: (inout [String: Any], Dictionary<String, Any>.Element) -> Void = { result, element in
+                        let (key, value) = element
+                        switch value {
+                        case Optional<Any>.none where result.keys.contains(key):
+                            result[key] = Style.layerPropertyDefaultValue(for: layer.type, property: key).value
+                            // swiftlint:disable:next syntactic_sugar
+                        case Optional<Any>.some:
+                            result[key] = value
+                        default: break
+                        }
+                    }
+                    let layerProperties: [String: Any] = try layer
+                        .allStyleProperties(userInfo: [:], shouldEncodeNilValues: true)
+                        .reduce(into: oldLayerProperties, { result, element in
+                            if let dictionary = element.value as? [String: Any] {
+                                result[element.key] = dictionary.reduce(
+                                    into: oldLayerProperties[element.key] as? [String: Any] ?? [:],
+                                    reduceStrategy
+                                )
+                            } else {
+                                reduceStrategy(&result, element)
+                            }
+                        })
+
+                    DispatchQueue.main.async {
+                        do {
+                            // Apply the changes to the layer properties to the style
+                            try self.setLayerProperties(for: id, properties: layerProperties)
+                        }
+                        catch {
+                            completion?(error)
+                        }
+                    }
+                }
+                catch {
+                    completion?(error)
+                }
+            }
+        }
+        catch {
+            completion?(error)
+        }
+    }
+
     // MARK: - Sources
 
     /**
